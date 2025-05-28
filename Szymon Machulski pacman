@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-# Console Pac-Man game with 20 levels
-# Uses curses for console control
-#
-# Features:
-# - 20 levels with increasing difficulty (maze complexity, ghost speed)
-# - Pac-Man movement with arrow keys
-# - Ghost AI chasing Pac-Man
-# - Pellet collection and scoring
-# - Lives and game over
-# - Console rendering with colors
-
 import curses
 import time
 import random
