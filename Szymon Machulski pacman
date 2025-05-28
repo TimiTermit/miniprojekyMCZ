@@ -1,0 +1,463 @@
+#!/usr/bin/env python3
+# Console Pac-Man game with 20 levels
+# Uses curses for console control
+#
+# Features:
+# - 20 levels with increasing difficulty (maze complexity, ghost speed)
+# - Pac-Man movement with arrow keys
+# - Ghost AI chasing Pac-Man
+# - Pellet collection and scoring
+# - Lives and game over
+# - Console rendering with colors
+
+import curses
+import time
+import random
+from collections import deque
+
+# Constants for game objects
+WALL = '#'
+EMPTY = ' '
+PELLET = '.'
+POWER_PELLET = 'o'
+PACMAN = 'C'
+GHOST = 'G'
+
+# Directions
+UP = (-1, 0)
+DOWN = (1, 0)
+LEFT = (0, -1)
+RIGHT = (0, 1)
+STOP = (0, 0)
+
+# Mapping keys to directions
+KEYS_TO_DIR = {
+    curses.KEY_UP: UP,
+    curses.KEY_DOWN: DOWN,
+    curses.KEY_LEFT: LEFT,
+    curses.KEY_RIGHT: RIGHT,
+}
+
+# Game settings
+INITIAL_LIVES = 3
+LEVELS_COUNT = 20
+FRAME_DELAY = 0.12  # seconds per frame, adjustable per level
+
+# Colors
+COLOR_WALL = 1
+COLOR_PELLET = 2
+COLOR_POWER_PELLET = 3
+COLOR_PACMAN = 4
+COLOR_GHOST = 5
+COLOR_TEXT = 6
+
+class Position:
+    def __init__(self, y, x):
+        self.y = y
+        self.x = x
+
+    def __add__(self, other):
+        return Position(self.y + other[0], self.x + other[1])
+
+    def __eq__(self, other):
+        if other is None:
+            return False
+        return self.y == other.y and self.x == other.x
+
+    def __hash__(self):
+        return hash((self.y, self.x))
+
+    def copy(self):
+        return Position(self.y, self.x)
+
+    def neighbors(self):
+        return [
+            Position(self.y + 1, self.x),
+            Position(self.y - 1, self.x),
+            Position(self.y, self.x + 1),
+            Position(self.y, self.x - 1),
+        ]
+
+class Maze:
+    def __init__(self, layout):
+        # layout is list of strings representing rows
+        self.height = len(layout)
+        self.width = max(len(row) for row in layout)
+        self.grid = [list(row.ljust(self.width, WALL)) for row in layout]
+        self.pellets = set()
+        self.power_pellets = set()
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.grid[y][x] == PELLET:
+                    self.pellets.add(Position(y,x))
+                elif self.grid[y][x] == POWER_PELLET:
+                    self.power_pellets.add(Position(y,x))
+
+    def is_wall(self, pos):
+        if pos.y < 0 or pos.y >= self.height or pos.x < 0 or pos.x >= self.width:
+            return True
+        return self.grid[pos.y][pos.x] == WALL
+
+    def is_pellet(self, pos):
+        return pos in self.pellets
+
+    def is_power_pellet(self, pos):
+        return pos in self.power_pellets
+
+    def eat_pellet(self, pos):
+        if pos in self.pellets:
+            self.pellets.remove(pos)
+            self.grid[pos.y][pos.x] = EMPTY
+            return True
+        return False
+
+    def eat_power_pellet(self, pos):
+        if pos in self.power_pellets:
+            self.power_pellets.remove(pos)
+            self.grid[pos.y][pos.x] = EMPTY
+            return True
+        return False
+
+    def pellets_count(self):
+        return len(self.pellets) + len(self.power_pellets)
+
+    def draw(self, stdscr):
+        for y in range(self.height):
+            for x in range(self.width):
+                ch = self.grid[y][x]
+                pos = Position(y,x)
+                if pos in self.pellets:
+                    stdscr.addch(y, x, PELLET, curses.color_pair(COLOR_PELLET))
+                elif pos in self.power_pellets:
+                    stdscr.addch(y, x, POWER_PELLET, curses.color_pair(COLOR_POWER_PELLET))
+                elif ch == WALL:
+                    stdscr.addch(y, x, WALL, curses.color_pair(COLOR_WALL))
+                else:
+                    stdscr.addch(y, x, EMPTY)
+
+class Entity:
+    def __init__(self, pos, icon):
+        self.pos = pos
+        self.icon = icon
+        self.direction = STOP
+
+class Pacman(Entity):
+    def __init__(self, pos):
+        super().__init__(pos, PACMAN)
+        self.lives = INITIAL_LIVES
+        self.score = 0
+        self.power_mode = False
+        self.power_mode_counter = 0
+
+    def move(self, maze, direction):
+        new_pos = self.pos + direction
+        if not maze.is_wall(new_pos):
+            self.pos = new_pos
+            self.direction = direction
+            return True
+        return False
+
+    def update_power_mode(self):
+        if self.power_mode:
+            self.power_mode_counter -= 1
+            if self.power_mode_counter <= 0:
+                self.power_mode = False
+
+class Ghost(Entity):
+    def __init__(self, pos):
+        super().__init__(pos, GHOST)
+        self.alive = True
+        self.frightened = False
+        self.frightened_counter = 0
+        self.home_pos = pos.copy()
+
+    def set_frightened(self, duration):
+        self.frightened = True
+        self.frightened_counter = duration
+
+    def update(self):
+        if self.frightened:
+            self.frightened_counter -= 1
+            if self.frightened_counter <= 0:
+                self.frightened = False
+
+def find_path_bfs(maze, start, goals):
+    # Breadth-first search to find shortest path from start to nearest of goals positions
+    # Returns next step position or None if no path
+    queue = deque()
+    visited = set()
+    queue.append((start, None))  # (current_position, first_step)
+    visited.add(start)
+    first_steps = {}
+
+    while queue:
+        current, first = queue.popleft()
+        if current in goals:
+            return first if first is not None else current
+        for d in [UP, DOWN, LEFT, RIGHT]:
+            neighbor = current + d
+            if not maze.is_wall(neighbor) and neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, first if first is not None else neighbor))
+    return None
+
+def find_random_move(maze, pos):
+    # Choose a random direction that is not a wall
+    directions = [UP, DOWN, LEFT, RIGHT]
+    valid = []
+    for d in directions:
+        np = pos + d
+        if not maze.is_wall(np):
+            valid.append(d)
+    if valid:
+        return random.choice(valid)
+    return STOP
+
+def draw_hud(stdscr, pacman, level):
+    height, width = stdscr.getmaxyx()
+    text = f"Score: {pacman.score}  Lives: {pacman.lives}  Level: {level+1}/20"
+    stdscr.addstr(0, 0, text, curses.color_pair(COLOR_TEXT))
+
+def generate_level_layout(level):
+    # Create levels with increasing complexity and size from level number
+    # Simple base maze and add walls and pellets programmatically
+
+    base_maze = [
+        "############################",
+        "#............##............#",
+        "#.####.#####.##.#####.####.#",
+        "#o####.#####.##.#####.####o#",
+        "#.####.#####.##.#####.####.#",
+        "#..........................#",
+        "#.####.##.########.##.####.#",
+        "#.####.##.########.##.####.#",
+        "#......##....##....##......#",
+        "######.##### ## #####.######",
+        "     #.##### ## #####.#     ",
+        "     #.##          ##.#     ",
+        "     #.## ###--### ##.#     ",
+        "######.## #      # ##.######",
+        "      .   #      #   .      ",
+        "######.## ######## ##.######",
+        "     #.##          ##.#     ",
+        "     #.## ######## ##.#     ",
+        "     #.##          ##.#     ",
+        "######.## ######## ##.######",
+        "#............##............#",
+        "#.####.#####.##.#####.####.#",
+        "#o####.#####.##.#####.####o#",
+        "#..##................##..#",
+        "###.##.##.########.##.##.##",
+        "#......##....##....##......#",
+        "#.##########.##.##########.#",
+        "#..........................#",
+        "############################"
+    ]
+
+    # Modify base_maze based on level, increase pellets, ghosts speed or count, or add obstacles
+    # For simplicity, I will just use the base maze and place pellets in empty spaces
+
+    maze = []
+    for row in base_maze:
+        maze.append(list(row))
+
+    # Add extra walls or obstacles based on level
+    # Every odd level add some walls randomly
+    if level > 0:
+        randomness = min(level, 5)
+        for _ in range(randomness * 5):
+            y = random.randint(1, len(maze)-2)
+            x = random.randint(1, len(maze[0])-2)
+            if maze[y][x] == EMPTY:
+                maze[y][x] = WALL
+
+    # Add pellets ('.') and power pellets ('o')
+    for y in range(1, len(maze)-1):
+        for x in range(1, len(maze[0])-1):
+            if maze[y][x] == EMPTY:
+                maze[y][x] = PELLET
+    # Place power pellets at corners
+    corners = [(1,1), (1,len(maze[0])-2), (len(maze)-2,1), (len(maze)-2,len(maze[0])-2)]
+    for cy, cx in corners:
+        maze[cy][cx] = POWER_PELLET
+
+    # Convert back to string list
+    layout = [''.join(row) for row in maze]
+    return layout
+
+def find_pacman_start(maze):
+    # Place Pac-Man near center bottom
+    center_y = maze.height - 3
+    center_x = maze.width // 2
+    pos = Position(center_y, center_x)
+    # If wall, move left until empty
+    while maze.is_wall(pos):
+        pos = Position(pos.y, pos.x-1)
+    return pos
+
+def find_ghost_starts(maze):
+    # Place ghosts near top center, shifted
+    starts = []
+    mid_x = maze.width // 2
+    y = 10
+    offsets = [-2, -1, 0, 1]
+    for off in offsets:
+        pos = Position(y, mid_x + off)
+        if not maze.is_wall(pos):
+            starts.append(pos)
+    return starts
+
+def draw_entity(stdscr, entity, color):
+    stdscr.addch(entity.pos.y, entity.pos.x, entity.icon, curses.color_pair(color))
+
+def main(stdscr):
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    stdscr.timeout(100)
+    curses.start_color()
+
+    curses.init_pair(COLOR_WALL, curses.COLOR_BLUE, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_PELLET, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_POWER_PELLET, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_PACMAN, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_GHOST, curses.COLOR_RED, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_TEXT, curses.COLOR_WHITE, curses.COLOR_BLACK)
+
+    level = 0
+    lives = INITIAL_LIVES
+    global_delay = FRAME_DELAY
+
+    while level < LEVELS_COUNT:
+        # Generate maze layout
+        layout = generate_level_layout(level)
+        maze = Maze(layout)
+
+        # Create Pac-Man and ghosts
+        pacman = Pacman(find_pacman_start(maze))
+        ghosts = [Ghost(pos.copy()) for pos in find_ghost_starts(maze)]
+
+        # Set ghosts speed (delay between moves) based on level
+        ghost_move_delay = max(0.3 - level*0.01, 0.1)
+        ghost_move_counter = 0
+
+        frame_count = 0
+        power_mode_duration = int(30 / global_delay)  # power pellet effect frames
+
+        running = True
+
+        key_direction = STOP
+
+        while running:
+            start_time = time.time()
+            stdscr.clear()
+
+            # Input handling
+            try:
+                key = stdscr.getch()
+            except:
+                key = -1
+            if key in KEYS_TO_DIR:
+                key_direction = KEYS_TO_DIR[key]
+
+            # Pacman moves
+            pacman.move(maze, key_direction)
+
+            # Check pellet eating
+            if maze.eat_pellet(pacman.pos):
+                pacman.score += 10
+            if maze.eat_power_pellet(pacman.pos):
+                pacman.score += 50
+                pacman.power_mode = True
+                pacman.power_mode_counter = power_mode_duration
+                for ghost in ghosts:
+                    ghost.set_frightened(power_mode_duration)
+
+            pacman.update_power_mode()
+
+            # Move ghosts every few frames
+            ghost_move_counter += global_delay
+            if ghost_move_counter >= ghost_move_delay:
+                ghost_move_counter = 0
+                for ghost in ghosts:
+                    ghost.update()
+                    if ghost.frightened:
+                        # Move ghost away from pacman randomly
+                        possible_directions = []
+                        for d in [UP, DOWN, LEFT, RIGHT]:
+                            np = ghost.pos + d
+                            if not maze.is_wall(np):
+                                possible_directions.append(d)
+                        # prefer directions away from pacman
+                        def dist_to_pacman(pos):
+                            return abs(pos.y - pacman.pos.y) + abs(pos.x - pacman.pos.x)
+                        possible_directions.sort(key=lambda d: dist_to_pacman(ghost.pos + d), reverse=True)
+                        if possible_directions:
+                            ghost.pos = ghost.pos + possible_directions[0]
+                    else:
+                        # Chase Pac-Man using BFS pathfinding
+                        next_step = find_path_bfs(maze, ghost.pos, [pacman.pos])
+                        if next_step and not maze.is_wall(next_step):
+                            ghost.pos = next_step
+
+            # Collision detection
+            for ghost in ghosts:
+                if ghost.pos == pacman.pos:
+                    if pacman.power_mode and ghost.frightened:
+                        # Ghost eaten
+                        pacman.score += 200
+                        ghost.pos = ghost.home_pos.copy()
+                        ghost.frightened = False
+                        ghost.frightened_counter = 0
+                    else:
+                        # Pacman dies
+                        pacman.lives -= 1
+                        pacman.pos = find_pacman_start(maze)
+                        # Reset ghosts
+                        for g in ghosts:
+                            g.pos = g.home_pos.copy()
+                            g.frightened = False
+                        if pacman.lives <= 0:
+                            # Game over
+                            running = False
+
+            # Draw maze and entities
+            maze.draw(stdscr)
+            draw_entity(stdscr, pacman, COLOR_PACMAN)
+            for ghost in ghosts:
+                color = COLOR_GHOST
+                if ghost.frightened:
+                    color = COLOR_POWER_PELLET
+                draw_entity(stdscr, ghost, color)
+
+            draw_hud(stdscr, pacman, level)
+
+            stdscr.refresh()
+
+            # Check win (all pellets eaten)
+            if maze.pellets_count() == 0:
+                level += 1
+                running = False
+                # small animation or message could be added here
+
+            # Frame timing
+            elapsed = time.time() - start_time
+            sleep_time = max(global_delay - elapsed, 0)
+            time.sleep(sleep_time)
+            frame_count += 1
+
+    # Game over screen
+    stdscr.clear()
+    msg1 = "GAME OVER"
+    msg2 = f"Your score: {pacman.score}"
+    msg3 = "Press any key to exit."
+    height, width = stdscr.getmaxyx()
+    stdscr.addstr(height//2 - 1, max(0, (width - len(msg1))//2), msg1, curses.color_pair(COLOR_TEXT) | curses.A_BOLD)
+    stdscr.addstr(height//2, max(0, (width - len(msg2))//2), msg2, curses.color_pair(COLOR_TEXT))
+    stdscr.addstr(height//2 + 1, max(0, (width - len(msg3))//2), msg3, curses.color_pair(COLOR_TEXT))
+    stdscr.refresh()
+    stdscr.nodelay(False)
+    stdscr.getch()
+
+if __name__ == "__main__":
+    curses.wrapper(main)
+
