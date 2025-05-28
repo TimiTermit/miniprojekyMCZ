@@ -1,0 +1,601 @@
+import pygame
+import random
+import sys
+
+# Game constants
+SCREEN_WIDTH, SCREEN_HEIGHT = 800, 600
+TILE_SIZE = 40
+FPS = 60
+
+# Colors
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GRAY = (150, 150, 150)
+GREEN = (0, 255, 0)
+RED = (255, 0, 0)
+BLUE = (0, 0, 255)
+YELLOW = (255, 255, 0)
+CYAN = (0, 255, 255)
+MAGENTA = (255, 0, 255)
+
+pygame.init()
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("RPG Pokemon-style Arena")
+clock = pygame.time.Clock()
+font = pygame.font.SysFont("Arial", 20)
+
+# Classes for Player
+class CharacterClass:
+    def __init__(self, name, hp, attack, defense, speed):
+        self.name = name
+        self.hp = hp
+        self.attack = attack
+        self.defense = defense
+        self.speed = speed
+
+# Classes available
+CHARACTER_CLASSES = {
+    "Warrior": CharacterClass("Warrior", hp=120, attack=15, defense=10, speed=5),
+    "Mage": CharacterClass("Mage", hp=80, attack=20, defense=5, speed=8),
+    "Rogue": CharacterClass("Rogue", hp=100, attack=12, defense=7, speed=12),
+}
+
+# Moves for monsters / players
+class Move:
+    def __init__(self, name, power, accuracy, move_type):
+        self.name = name
+        self.power = power
+        self.accuracy = accuracy  # 0-100 percentage
+        self.move_type = move_type
+
+# Some example moves
+BASE_MOVES = [
+    Move("Scratch", 15, 95, "Normal"),
+    Move("Fireball", 25, 85, "Fire"),
+    Move("Slash", 20, 90, "Normal"),
+    Move("Ice Shard", 22, 90, "Ice"),
+    Move("Poison Fang", 18, 90, "Poison"),
+]
+
+# Monster class for battle creatures
+class Monster:
+    def __init__(self, name, max_hp, attack, defense, speed, moves):
+        self.name = name
+        self.max_hp = max_hp
+        self.current_hp = max_hp
+        self.attack = attack
+        self.defense = defense
+        self.speed = speed
+        self.moves = moves
+
+    def is_alive(self):
+        return self.current_hp > 0
+
+    def take_damage(self, damage):
+        self.current_hp -= damage
+        if self.current_hp < 0:
+            self.current_hp = 0
+
+# Player class in overworld
+class Player:
+    def __init__(self, x, y, character_class):
+        self.x = x
+        self.y = y
+        self.width = TILE_SIZE - 4
+        self.height = TILE_SIZE - 4
+        self.speed = 4
+        self.character_class = character_class
+        self.color = BLUE
+        self.monsters = [] # Monsters owned by player
+    
+    def draw(self, surface):
+        pygame.draw.rect(surface, self.color, (self.x, self.y, self.width, self.height))
+    
+    def move(self, dx, dy, world_width_px, world_height_px):
+        new_x = self.x + dx * self.speed
+        new_y = self.y + dy * self.speed
+
+        # Bound movement inside the world bounds
+        if 0 <= new_x <= world_width_px - self.width:
+            self.x = new_x
+        if 0 <= new_y <= world_height_px - self.height:
+            self.y = new_y
+
+# Shop class - places on map where monsters spawn and can be bought
+class Shop:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.width = TILE_SIZE
+        self.height = TILE_SIZE
+        self.color = YELLOW
+        self.spawned_monsters = []
+        self.spawn_monsters()
+
+    def spawn_monsters(self):
+        # Spawn 2 random monsters for sale
+        monster_templates = [
+            ("Flamester", 70, 18, 8, 12, [BASE_MOVES[1], BASE_MOVES[0]]),  # Fireball, Scratch
+            ("Icyclaw", 65, 17, 10, 10, [BASE_MOVES[3], BASE_MOVES[2]]),   # Ice Shard, Slash
+            ("Toxipup", 80, 15, 12, 8, [BASE_MOVES[4], BASE_MOVES[0]]),    # Poison Fang, Scratch
+            ("Clawbert", 90, 14, 15, 6, [BASE_MOVES[2], BASE_MOVES[0]]),    # Slash, Scratch
+        ]
+        self.spawned_monsters = []
+        for _ in range(2):
+            spec = random.choice(monster_templates)
+            m = Monster(*spec)
+            self.spawned_monsters.append(m)
+
+    def draw(self, surface):
+        pygame.draw.rect(surface, self.color, (self.x, self.y, self.width, self.height))
+
+# Overworld class
+class Overworld:
+    def __init__(self):
+        self.width_in_tiles = SCREEN_WIDTH // TILE_SIZE
+        self.height_in_tiles = SCREEN_HEIGHT // TILE_SIZE
+        self.world_width_px = self.width_in_tiles * TILE_SIZE
+        self.world_height_px = self.height_in_tiles * TILE_SIZE
+
+        # Create a player starting in center
+        self.player = Player(self.world_width_px//2, self.world_height_px//2, CHARACTER_CLASSES["Warrior"])
+        self.shops = [
+            Shop(2*TILE_SIZE, 3*TILE_SIZE),
+            Shop(10*TILE_SIZE, 8*TILE_SIZE),
+            Shop(15*TILE_SIZE, 5*TILE_SIZE)
+        ]
+        self.in_battle = False
+        self.battle = None
+        self.in_arena = False
+        self.arena = None
+
+    def update(self):
+        # Handle battle mode
+        if self.in_battle and self.battle:
+            self.battle.update()
+            if self.battle.over:
+                self.in_battle = False
+                self.battle = None
+
+        elif self.in_arena and self.arena:
+            self.arena.update()
+            if self.arena.over:
+                self.in_arena = False
+                self.arena = None
+
+    def draw(self, surface):
+        surface.fill(GRAY)
+
+        # Draw grid for world tiles
+        for x in range(self.width_in_tiles):
+            for y in range(self.height_in_tiles):
+                rect = (x*TILE_SIZE, y*TILE_SIZE, TILE_SIZE, TILE_SIZE)
+                pygame.draw.rect(surface, WHITE, rect, 1)
+
+        # Draw shops
+        for shop in self.shops:
+            shop.draw(surface)
+
+        # Draw player
+        self.player.draw(surface)
+
+        # Draw instructions
+        self.draw_text(surface, "Arrow keys to move. Press 'S' near shop to open shop.", 10, 10)
+        self.draw_text(surface, "Press 'A' to enter arena mode (2 players).", 10, 30)
+        self.draw_text(surface, f"Your class: {self.player.character_class.name}", 10, 50)
+        self.draw_text(surface, f"Monsters owned: {len(self.player.monsters)}", 10, 70)
+
+        # If battle active, draw battle overlay
+        if self.in_battle and self.battle:
+            self.battle.draw(surface)
+        elif self.in_arena and self.arena:
+            self.arena.draw(surface)
+
+    def draw_text(self, surface, text, x, y, color=BLACK):
+        txt_surf = font.render(text, True, color)
+        surface.blit(txt_surf, (x, y))
+
+    def check_shop_interaction(self):
+        # Return shop if player is near
+        px = self.player.x + self.player.width//2
+        py = self.player.y + self.player.height//2
+        for shop in self.shops:
+            sx = shop.x + shop.width//2
+            sy = shop.y + shop.height//2
+            dist = ((px - sx)**2 + (py - sy)**2)**0.5
+            if dist < TILE_SIZE:
+                return shop
+        return None
+
+# Battle system similar to Pokemon
+class Battle:
+    def __init__(self, player, enemy_monster):
+        self.player = player
+        self.player_monster = player.monsters[0] if player.monsters else None
+        self.enemy_monster = enemy_monster
+        self.turn = "player" if (self.player_monster.speed >= self.enemy_monster.speed) else "enemy"
+        self.battle_log = []
+        self.over = False
+        self.winner = None
+        self.selected_move_index = 0
+        self.action_cooldown = 0  # cooldown to slow turn switch
+        self.action_delay = 30
+
+    def update(self):
+        if self.over:
+            return
+
+        if self.action_cooldown > 0:
+            self.action_cooldown -= 1
+            return
+
+        if self.turn == "player":
+            # Wait for player input
+            keys = pygame.key.get_pressed()
+            if keys[pygame.K_UP]:
+                self.selected_move_index = (self.selected_move_index -1) % len(self.player_monster.moves)
+                self.action_cooldown = self.action_delay
+            elif keys[pygame.K_DOWN]:
+                self.selected_move_index = (self.selected_move_index +1) % len(self.player_monster.moves)
+                self.action_cooldown = self.action_delay
+            elif keys[pygame.K_RETURN]:
+                self.player_attack()
+                self.turn = "enemy"
+                self.action_cooldown = self.action_delay
+        else:
+            self.enemy_attack()
+            if self.over:
+                return
+            self.turn = "player"
+            self.action_cooldown = self.action_delay
+
+    def player_attack(self):
+        move = self.player_monster.moves[self.selected_move_index]
+        hit_roll = random.randint(1, 100)
+        if hit_roll <= move.accuracy:
+            damage = max(1, move.power + self.player_monster.attack - self.enemy_monster.defense)
+            self.enemy_monster.take_damage(damage)
+            self.battle_log.append(f"Your {self.player_monster.name} used {move.name}! It hit for {damage} damage.")
+        else:
+            self.battle_log.append(f"Your {self.player_monster.name} tried {move.name} but missed!")
+
+        if not self.enemy_monster.is_alive():
+            self.battle_log.append(f"The enemy {self.enemy_monster.name} fainted!")
+            self.over = True
+            self.winner = "player"
+
+    def enemy_attack(self):
+        move = random.choice(self.enemy_monster.moves)
+        hit_roll = random.randint(1, 100)
+        if hit_roll <= move.accuracy:
+            damage = max(1, move.power + self.enemy_monster.attack - self.player_monster.defense)
+            self.player_monster.take_damage(damage)
+            self.battle_log.append(f"Enemy {self.enemy_monster.name} used {move.name}! It hit for {damage} damage.")
+        else:
+            self.battle_log.append(f"Enemy {self.enemy_monster.name} tried {move.name} but missed!")
+
+        if not self.player_monster.is_alive():
+            self.battle_log.append(f"Your {self.player_monster.name} fainted!")
+            self.over = True
+            self.winner = "enemy"
+
+    def draw(self, surface):
+        # Dim background
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(200)
+        overlay.fill(WHITE)
+        surface.blit(overlay, (0,0))
+
+        # Draw enemy monster info at top right
+        self.draw_monster_info(surface, self.enemy_monster, SCREEN_WIDTH-300, 20)
+        # Draw player monster info at bottom left
+        self.draw_monster_info(surface, self.player_monster, 20, SCREEN_HEIGHT-180)
+
+        # Draw battle log box
+        box_rect = pygame.Rect(20, SCREEN_HEIGHT-260, SCREEN_WIDTH-40, 120)
+        pygame.draw.rect(surface, BLACK, box_rect)
+        pygame.draw.rect(surface, WHITE, box_rect.inflate(-4, -4))
+
+        # Show last 4 battle log entries
+        logs_to_show = self.battle_log[-4:]
+        for i, line in enumerate(logs_to_show):
+            txt = font.render(line, True, BLACK)
+            surface.blit(txt, (box_rect.x+10, box_rect.y+10 + i*22))
+
+        # Draw player's move choices if it's player's turn and battle not over
+        if not self.over and self.turn == "player":
+            move_box = pygame.Rect(20, SCREEN_HEIGHT-380, SCREEN_WIDTH-40, 100)
+            pygame.draw.rect(surface, BLACK, move_box)
+            pygame.draw.rect(surface, WHITE, move_box.inflate(-4, -4))
+            for i, move in enumerate(self.player_monster.moves):
+                color = RED if i == self.selected_move_index else BLACK
+                txt = font.render(f"{move.name} (Pow:{move.power} Acc:{move.accuracy}%)", True, color)
+                surface.blit(txt, (move_box.x+10, move_box.y+10 + i*22))
+
+        # If battle over show winner message
+        if self.over:
+            win_text = "You won!" if self.winner == "player" else "You lost!"
+            txt = font.render(win_text + " Press ENTER to return.", True, BLACK)
+            surface.blit(txt, (SCREEN_WIDTH//2 - txt.get_width()//2, SCREEN_HEIGHT//2))
+
+# Arena mode for two players
+class Arena:
+    def __init__(self):
+        # Each player picks a monster
+        template_monsters = [
+            Monster("Flamester", 70, 18, 8, 12, [BASE_MOVES[1], BASE_MOVES[0]]),
+            Monster("Icyclaw", 65, 17, 10, 10, [BASE_MOVES[3], BASE_MOVES[2]]),
+            Monster("Toxipup", 80, 15, 12, 8, [BASE_MOVES[4], BASE_MOVES[0]]),
+            Monster("Clawbert", 90, 14, 15, 6, [BASE_MOVES[2], BASE_MOVES[0]]),
+        ]
+        self.player1_monster = random.choice(template_monsters)
+        self.player2_monster = random.choice(template_monsters)
+        self.turn = "player1" if (self.player1_monster.speed >= self.player2_monster.speed) else "player2"
+        self.battle_log = []
+        self.over = False
+        self.winner = None
+        self.action_cooldown = 0
+        self.action_delay = 30
+        self.p1_selected_move_index = 0
+        self.p2_selected_move_index = 0
+
+    def update(self):
+        if self.over:
+            return
+
+        keys = pygame.key.get_pressed()
+        if self.action_cooldown > 0:
+            self.action_cooldown -= 1
+            return
+
+        if self.turn == "player1":
+            # Player 1 controls with WASD and Space
+            if keys[pygame.K_w]:
+                self.p1_selected_move_index = (self.p1_selected_move_index -1) % len(self.player1_monster.moves)
+                self.action_cooldown = self.action_delay
+            elif keys[pygame.K_s]:
+                self.p1_selected_move_index = (self.p1_selected_move_index +1) % len(self.player1_monster.moves)
+                self.action_cooldown = self.action_delay
+            elif keys[pygame.K_SPACE]:
+                self.player1_attack()
+                self.turn = "player2"
+                self.action_cooldown = self.action_delay
+        else:
+            # Player 2 controls with Arrow keys and Enter
+            if keys[pygame.K_UP]:
+                self.p2_selected_move_index = (self.p2_selected_move_index -1) % len(self.player2_monster.moves)
+                self.action_cooldown = self.action_delay
+            elif keys[pygame.K_DOWN]:
+                self.p2_selected_move_index = (self.p2_selected_move_index +1) % len(self.player2_monster.moves)
+                self.action_cooldown = self.action_delay
+            elif keys[pygame.K_RETURN]:
+                self.player2_attack()
+                self.turn = "player1"
+                self.action_cooldown = self.action_delay
+
+    def player1_attack(self):
+        move = self.player1_monster.moves[self.p1_selected_move_index]
+        hit_roll = random.randint(1, 100)
+        if hit_roll <= move.accuracy:
+            damage = max(1, move.power + self.player1_monster.attack - self.player2_monster.defense)
+            self.player2_monster.take_damage(damage)
+            self.battle_log.append(f"Player1's {self.player1_monster.name} used {move.name}! It hit {damage} damage.")
+        else:
+            self.battle_log.append(f"Player1's {self.player1_monster.name} missed {move.name}!")
+
+        if not self.player2_monster.is_alive():
+            self.battle_log.append(f"Player2's {self.player2_monster.name} fainted!")
+            self.over = True
+            self.winner = "player1"
+
+    def player2_attack(self):
+        move = self.player2_monster.moves[self.p2_selected_move_index]
+        hit_roll = random.randint(1, 100)
+        if hit_roll <= move.accuracy:
+            damage = max(1, move.power + self.player2_monster.attack - self.player1_monster.defense)
+            self.player1_monster.take_damage(damage)
+            self.battle_log.append(f"Player2's {self.player2_monster.name} used {move.name}! It hit {damage} damage.")
+        else:
+            self.battle_log.append(f"Player2's {self.player2_monster.name} missed {move.name}!")
+
+        if not self.player1_monster.is_alive():
+            self.battle_log.append(f"Player1's {self.player1_monster.name} fainted!")
+            self.over = True
+            self.winner = "player2"
+
+    def draw(self, surface):
+        surface.fill(WHITE)
+
+        # Draw monsters info
+        self.draw_monster_info(surface, self.player1_monster, 50, SCREEN_HEIGHT//2 - 150, BLUE, "Player 1")
+        self.draw_monster_info(surface, self.player2_monster, SCREEN_WIDTH-350, SCREEN_HEIGHT//2 - 150, RED, "Player 2")
+
+        # Draw battle log box
+        box_rect = pygame.Rect(50, SCREEN_HEIGHT - 220, SCREEN_WIDTH - 100, 180)
+        pygame.draw.rect(surface, BLACK, box_rect)
+        pygame.draw.rect(surface, WHITE, box_rect.inflate(-4, -4))
+
+        logs_to_show = self.battle_log[-6:]
+        for i, line in enumerate(logs_to_show):
+            txt = font.render(line, True, BLACK)
+            surface.blit(txt, (box_rect.x + 10, box_rect.y + 10 + i*22))
+
+        # Draw move selections
+        if not self.over:
+            # Player 1 move selection
+            self.draw_moves(surface, self.player1_monster.moves, 50, SCREEN_HEIGHT - 300, self.p1_selected_move_index)
+            # Player 2 move selection
+            self.draw_moves(surface, self.player2_monster.moves, SCREEN_WIDTH - 350, SCREEN_HEIGHT - 300, self.p2_selected_move_index)
+
+        # If battle over show winner
+        if self.over:
+            win_text = "Player 1 Wins!" if self.winner == "player1" else "Player 2 Wins!"
+            txt = font.render(win_text + " Press ENTER to return.", True, BLACK)
+            surface.blit(txt, (SCREEN_WIDTH//2 - txt.get_width()//2, SCREEN_HEIGHT//2))
+
+    def draw_monster_info(self, surface, monster, x, y, color=BLACK, label=None):
+        if not monster:
+            return
+        rect = pygame.Rect(x, y, 300, 140)
+        pygame.draw.rect(surface, color, rect, 2)
+        name_txt = font.render(f"{label + ': ' if label else ''}{monster.name}", True, color)
+        surface.blit(name_txt, (x+10, y+10))
+        hp_txt = font.render(f"HP: {monster.current_hp}/{monster.max_hp}", True, RED)
+        surface.blit(hp_txt, (x+10, y+40))
+        atk_txt = font.render(f"ATK: {monster.attack}", True, BLACK)
+        surface.blit(atk_txt, (x+10, y+70))
+        def_txt = font.render(f"DEF: {monster.defense}", True, BLACK)
+        surface.blit(def_txt, (x+100, y+70))
+        spd_txt = font.render(f"SPD: {monster.speed}", True, BLACK)
+        surface.blit(spd_txt, (x+170, y+70))
+
+    def draw_moves(self, surface, moves, x, y, selected_index):
+        box = pygame.Rect(x, y, 300, 80)
+        pygame.draw.rect(surface, BLACK, box)
+        pygame.draw.rect(surface, WHITE, box.inflate(-4, -4))
+        for i, move in enumerate(moves):
+            color = RED if i == selected_index else BLACK
+            txt = font.render(f"{move.name} (Pow:{move.power} Acc:{move.accuracy}%)", True, color)
+            surface.blit(txt, (x + 10, y + 10 + i*22))
+
+def main():
+    overworld = Overworld()
+    running = True
+
+    while running:
+        clock.tick(FPS)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+            elif event.type == pygame.KEYDOWN:
+                if overworld.in_battle:
+                    if overworld.battle.over and event.key == pygame.K_RETURN:
+                        # End battle and go back to overworld
+                        overworld.in_battle = False
+                        overworld.battle = None
+
+                elif overworld.in_arena:
+                    if overworld.arena.over and event.key == pygame.K_RETURN:
+                        overworld.in_arena = False
+                        overworld.arena = None
+
+                else:
+                    # Overworld controls
+                    if event.key == pygame.K_s:
+                        # Interact with shop if close enough
+                        shop = overworld.check_shop_interaction()
+                        if shop:
+                            # Open shop menu - pick and buy monster
+                            purchase_monster_from_shop(overworld.player, shop)
+
+                    elif event.key == pygame.K_a:
+                        # Enter arena mode
+                        overworld.in_arena = True
+                        overworld.arena = Arena()
+
+        keys = pygame.key.get_pressed()
+
+        if not overworld.in_battle and not overworld.in_arena:
+            dx = dy = 0
+            if keys[pygame.K_LEFT]:
+                dx = -1
+            elif keys[pygame.K_RIGHT]:
+                dx = 1
+            if keys[pygame.K_UP]:
+                dy = -1
+            elif keys[pygame.K_DOWN]:
+                dy = 1
+            overworld.player.move(dx, dy, overworld.world_width_px, overworld.world_height_px)
+
+            # Check for random battle start near monsters? Not needed but could be implemented
+
+        overworld.update()
+        overworld.draw(screen)
+        pygame.display.flip()
+
+    pygame.quit()
+    sys.exit()
+
+def purchase_monster_from_shop(player, shop):
+    # Simple text-based monster purchase dialog in console
+    print("\nShop Monsters for sale:")
+    for i, m in enumerate(shop.spawned_monsters):
+        print(f"{i+1}. {m.name} (HP:{m.max_hp} ATK:{m.attack} DEF:{m.defense} SPD:{m.speed})")
+
+    # Simplified purchase: player automatically gets first monster if has none
+    if len(player.monsters) == 0:
+        monster = shop.spawned_monsters[0]
+        player.monsters.append(monster)
+        print(f"You bought {monster.name}!")
+    else:
+        print("You already have a monster. To buy more monsters, please extend this system.")
+
+    # Start battle to try new monster against random wild monster
+    wild_monster = random.choice(shop.spawned_monsters)
+    print("A wild monster appeared! Entering battle...")
+    # Start battle
+    global overworld_instance
+    overworld_instance.in_battle = True
+    overworld_instance.battle = Battle(player, wild_monster)
+
+# Global overworld instance reference for battle start inside purchase function
+overworld_instance = None
+
+if __name__ == "__main__":
+    overworld_instance = Overworld()
+    # Override main to use this instance
+    def main_override():
+        global overworld_instance
+        running = True
+        clock = pygame.time.Clock()
+
+        while running:
+            clock.tick(FPS)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+
+                elif event.type == pygame.KEYDOWN:
+                    if overworld_instance.in_battle:
+                        if overworld_instance.battle.over and event.key == pygame.K_RETURN:
+                            overworld_instance.in_battle = False
+                            overworld_instance.battle = None
+
+                    elif overworld_instance.in_arena:
+                        if overworld_instance.arena.over and event.key == pygame.K_RETURN:
+                            overworld_instance.in_arena = False
+                            overworld_instance.arena = None
+
+                    else:
+                        if event.key == pygame.K_s:
+                            shop = overworld_instance.check_shop_interaction()
+                            if shop:
+                                purchase_monster_from_shop(overworld_instance.player, shop)
+                        elif event.key == pygame.K_a:
+                            overworld_instance.in_arena = True
+                            overworld_instance.arena = Arena()
+
+            keys = pygame.key.get_pressed()
+            if not overworld_instance.in_battle and not overworld_instance.in_arena:
+                dx = dy = 0
+                if keys[pygame.K_LEFT]:
+                    dx = -1
+                elif keys[pygame.K_RIGHT]:
+                    dx = 1
+                if keys[pygame.K_UP]:
+                    dy = -1
+                elif keys[pygame.K_DOWN]:
+                    dy = 1
+                overworld_instance.player.move(dx, dy, overworld_instance.world_width_px, overworld_instance.world_height_px)
+
+            overworld_instance.update()
+            overworld_instance.draw(screen)
+            pygame.display.flip()
+
+        pygame.quit()
+        sys.exit()
+
+    main_override()
+
+```
