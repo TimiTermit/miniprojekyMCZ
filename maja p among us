@@ -1,0 +1,465 @@
+
+import curses
+import random
+import time
+from collections import namedtuple, deque
+
+# Game Constants
+WALL = '#'
+EMPTY = ' '
+DOOR = '+'
+TASK_SPOT = 'T'
+KILL_SPOT = 'K'
+REPORT_SPOT = 'R'
+
+PLAYER_CREWMATE = 'C'
+PLAYER_IMPOSTOR = 'I'
+
+# Directions
+UP = (-1,0)
+DOWN = (1,0)
+LEFT = (0,-1)
+RIGHT = (0,1)
+STOP = (0,0)
+DIRECTIONS = [UP, DOWN, LEFT, RIGHT]
+
+KEYS_TO_DIRECTION = {
+    curses.KEY_UP: UP,
+    curses.KEY_DOWN: DOWN,
+    curses.KEY_LEFT: LEFT,
+    curses.KEY_RIGHT: RIGHT,
+}
+
+# Colors
+COLOR_WALL = 1
+COLOR_DOOR = 2
+COLOR_TASK = 3
+COLOR_CREWMATE = 4
+COLOR_IMPOSTOR = 5
+COLOR_TEXT = 6
+COLOR_KILL = 7
+
+# Sizes of the maps (height, width)
+MAP_SIZES = {
+    'Skeld': (25, 40),
+    'Polus': (28, 50),
+    'MIRA': (22, 38),
+}
+
+Position = namedtuple('Position', ['y','x'])
+
+class Map:
+    def __init__(self, name, layout_lines):
+        self.name = name
+        self.layout_lines = layout_lines
+        self.height = len(layout_lines)
+        self.width = max(len(line) for line in layout_lines)
+        self.grid = [list(line.ljust(self.width, WALL)) for line in layout_lines]
+        self.task_spots = set()
+        self.kill_spots = set()
+        self.report_spots = set()
+        for y in range(self.height):
+            for x in range(self.width):
+                c = self.grid[y][x]
+                pos = Position(y,x)
+                if c == TASK_SPOT:
+                    self.task_spots.add(pos)
+                elif c == KILL_SPOT:
+                    self.kill_spots.add(pos)
+                elif c == REPORT_SPOT:
+                    self.report_spots.add(pos)
+
+    def is_wall(self, pos):
+        if pos.y < 0 or pos.y >= self.height or pos.x < 0 or pos.x >= self.width:
+            return True
+        return self.grid[pos.y][pos.x] == WALL
+
+    def is_door(self, pos):
+        return self.grid[pos.y][pos.x] == DOOR
+
+    def is_task_spot(self, pos):
+        return pos in self.task_spots
+
+    def is_kill_spot(self, pos):
+        return pos in self.kill_spots
+
+    def is_report_spot(self, pos):
+        return pos in self.report_spots
+
+    def draw(self, stdscr):
+        for y in range(self.height):
+            for x in range(self.width):
+                c = self.grid[y][x]
+                pos = Position(y,x)
+                if c == WALL:
+                    stdscr.addch(y, x, WALL, curses.color_pair(COLOR_WALL))
+                elif c == DOOR:
+                    stdscr.addch(y, x, DOOR, curses.color_pair(COLOR_DOOR))
+                elif c == TASK_SPOT:
+                    stdscr.addch(y, x, TASK_SPOT, curses.color_pair(COLOR_TASK))
+                elif c == KILL_SPOT:
+                    stdscr.addch(y, x, KILL_SPOT, curses.color_pair(COLOR_KILL))
+                elif c == REPORT_SPOT:
+                    stdscr.addch(y, x, REPORT_SPOT, curses.color_pair(COLOR_TASK))
+                else:
+                    stdscr.addch(y, x, EMPTY)
+
+class Player:
+    def __init__(self, name, start_pos, is_impostor=False):
+        self.name = name
+        self.pos = start_pos
+        self.is_impostor = is_impostor
+        self.alive = True
+        self.tasks_completed = 0
+        self.total_tasks = 0
+        self.reported_bodies = 0
+
+    def move(self, game_map, direction):
+        new_pos = Position(self.pos.y + direction[0], self.pos.x + direction[1])
+        if not game_map.is_wall(new_pos):
+            self.pos = new_pos
+
+    def can_do_task(self, game_map):
+        return self.alive and not self.is_impostor and game_map.is_task_spot(self.pos)
+
+    def can_kill(self, game_map):
+        return self.alive and self.is_impostor and game_map.is_kill_spot(self.pos)
+
+    def can_report(self, game_map):
+        return self.alive and game_map.is_report_spot(self.pos)
+
+class Task:
+    def __init__(self, pos):
+        self.pos = pos
+        self.completed = False
+
+class Game:
+    def __init__(self, stdscr):
+        self.stdscr = stdscr
+        self.maps = self.load_maps()
+        self.current_map_index = 0
+        self.game_map = None
+        self.players = []
+        self.tasks = []
+        self.killed_positions = set()
+        self.body_reports = []
+        self.player = None  # The human player
+        self.game_over = False
+        self.message = ""
+        self.num_players = 8
+        self.num_impostors = 2
+        self.task_goal = 5
+        self.turn_count = 0
+
+    def load_maps(self):
+        # Define 3 maps layouts
+        skeld = [
+            "########################################",
+            "#                                      #",
+            "#  T   #######   ###   #######    T    #",
+            "#      #     #       #         #       #",
+            "#  K   #  K  #  +    #    +    #   K   #",
+            "#      #######       #         #       #",
+            "#       T    +       #    T    +        #",
+            "#######         ###############   ######",
+            "#                                    K #",
+            "#     ###  T   ####   +  ####   T   ### #",
+            "#                                      #",
+            "#   T    ####       +       ####    T  #",
+            "#        #  #              #  #        #",
+            "#  ##### #  #  K     T     #  # #####  #",
+            "#  #     #######     +     #######  #  #",
+            "#  #            K          K         #  #",
+            "#  ##########  ###############   #####  #",
+            "#                                      #",
+            "########################################",
+        ]
+
+        polus = [
+            "##################################################",
+            "#                T         #      T             #",
+            "#    ###  ###########  ### #  ### ###########  ##",
+            "#    #    #         #    # #  #               #  #",
+            "#    #  K #    +    # K  # #  #     K    +    #  #",
+            "#    #    ###########    # #  #               #  #",
+            "#    # T      +        T # #  #       T       #  #",
+            "###  ##################### #  ##############  #  #",
+            "#                            +                  #  #",
+            "#    ##########  ########## ###############    #  #",
+            "#    #         TT         #     T          #    #  #",
+            "#    #  K           K     #                #    #  #",
+            "#    ##########  #########  ###########    #    #  #",
+            "#                            +                  #  #",
+            "##################################################",
+        ]
+
+        mira = [
+            "######################################",
+            "#   +      T     ######     +    T   #",
+            "#  ####### #######    ####### ####### #",
+            "#  #     # #     #    #     # #     # #",
+            "#  #  K  # #  K  # +  #  K  # #  K  # #",
+            "#  #     # #######    ####### #     # #",
+            "#  #######                      #######",
+            "#        +         T         +         #",
+            "######################################",
+        ]
+
+        return [
+            Map("Skeld", skeld),
+            Map("Polus", polus),
+            Map("MIRA", mira),
+        ]
+
+    def setup_game(self):
+        self.game_map = self.maps[self.current_map_index]
+        self.players.clear()
+        self.tasks.clear()
+        self.killed_positions.clear()
+        self.body_reports.clear()
+        self.game_over = False
+        self.message = ""
+        self.turn_count = 0
+
+        # Place players randomly
+        open_positions = []
+        for y in range(self.game_map.height):
+            for x in range(self.game_map.width):
+                pos = Position(y,x)
+                if not self.game_map.is_wall(pos) and not self.game_map.is_task_spot(pos) and not self.game_map.is_kill_spot(pos):
+                    open_positions.append(pos)
+        random.shuffle(open_positions)
+
+        self.num_players = min(self.num_players, len(open_positions))
+        impostors_assigned = 0
+
+        # Assign human player to first spot
+        human_start = open_positions.pop()
+        self.player = Player("You", human_start, is_impostor=False)
+        self.players.append(self.player)
+
+        # Assign other players
+        for i in range(1, self.num_players):
+            pos = open_positions.pop()
+            is_impostor = (impostors_assigned < self.num_impostors)
+            if is_impostor:
+                impostors_assigned += 1
+            self.players.append(Player(f"Bot{i}", pos, is_impostor))
+
+        # Assign tasks to crewmates (excluding impostors)
+        task_spots = list(self.game_map.task_spots)
+        random.shuffle(task_spots)
+        for p in self.players:
+            if not p.is_impostor:
+                # Assign a fixed number of tasks per player
+                p.total_tasks = self.task_goal
+                for i in range(self.task_goal):
+                    if task_spots:
+                        pos = task_spots.pop()
+                        self.tasks.append(Task(pos))
+
+    def draw(self):
+        self.stdscr.clear()
+        self.game_map.draw(self.stdscr)
+
+        # Draw players
+        for p in self.players:
+            if p.alive:
+                ch = PLAYER_IMPOSTOR if p.is_impostor else PLAYER_CREWMATE
+                color = COLOR_IMPOSTOR if p.is_impostor else COLOR_CREWMATE
+                self.stdscr.addch(p.pos.y, p.pos.x, ch, curses.color_pair(color) | curses.A_BOLD)
+            else:
+                # Dead player ghost
+                self.stdscr.addch(p.pos.y, p.pos.x, 'X', curses.color_pair(COLOR_TEXT))
+
+        # Draw tasks not done
+        for t in self.tasks:
+            if not t.completed:
+                self.stdscr.addch(t.pos.y, t.pos.x, TASK_SPOT, curses.color_pair(COLOR_TASK) | curses.A_DIM)
+
+        # Draw killed bodies
+        for pos in self.killed_positions:
+            self.stdscr.addch(pos.y, pos.x, 'B', curses.color_pair(COLOR_KILL) | curses.A_BOLD)
+
+        # HUD
+        status_lines = [
+            f"Map: {self.game_map.name}",
+            f"Your role: {'IMPOSTOR' if self.player.is_impostor else 'CREWMATE'}",
+            f"Tasks completed: {self.player.tasks_completed} / {self.player.total_tasks}",
+            f"Players alive: {sum(p.alive for p in self.players)} / {len(self.players)}",
+            f"Press arrows to move.",
+            f"'t' to do task, 'k' to kill, 'q' to quit.",
+            f"Turn: {self.turn_count}",
+            f"Message: {self.message}",
+        ]
+        for i, line in enumerate(status_lines):
+            self.stdscr.addstr(self.game_map.height + i + 1, 0, line, curses.color_pair(COLOR_TEXT))
+
+        self.stdscr.refresh()
+
+    def handle_input(self):
+        key = self.stdscr.getch()
+        if key in KEYS_TO_DIRECTION:
+            self.player.move(self.game_map, KEYS_TO_DIRECTION[key])
+            self.message = ""
+        elif key == ord('q'):
+            self.game_over = True
+        elif key == ord('t'):
+            # Try to do task if nearby
+            did_task = False
+            for task in self.tasks:
+                if not task.completed and task.pos == self.player.pos:
+                    task.completed = True
+                    self.player.tasks_completed += 1
+                    self.message = "Task completed!"
+                    did_task = True
+                    break
+            if not did_task:
+                self.message = "No task here to do."
+        elif key == ord('k'):
+            # Try to kill if impostor and on kill spot near crewmate
+            if self.player.is_impostor:
+                # Check if adjacent crew alive
+                for p in self.players:
+                    if p != self.player and p.alive and not p.is_impostor:
+                        if abs(p.pos.y - self.player.pos.y) + abs(p.pos.x - self.player.pos.x) == 1:
+                            # Kill
+                            p.alive = False
+                            self.killed_positions.add(p.pos)
+                            self.message = f"You killed {p.name}!"
+                            return
+                self.message = "No crewmate adjacent to kill."
+            else:
+                self.message = "You are not an impostor and cannot kill."
+        else:
+            self.message = ""
+
+    def bots_take_turn(self):
+        # Simple AI for bots
+        for bot in self.players:
+            if bot == self.player or not bot.alive:
+                continue
+            # If impostor, try to kill nearby crewmate
+            if bot.is_impostor:
+                # Move toward nearest crewmate if any alive
+                targets = [p for p in self.players if p.alive and not p.is_impostor]
+                if targets:
+                    target = min(targets, key=lambda p: abs(p.pos.y - bot.pos.y) + abs(p.pos.x - bot.pos.x))
+                    dist = abs(target.pos.y - bot.pos.y) + abs(target.pos.x - bot.pos.x)
+                    if dist == 1:
+                        # Kill
+                        target.alive = False
+                        self.killed_positions.add(target.pos)
+                        self.message = f"{bot.name} killed {target.name}."
+                        continue
+                    # Move toward target
+                    y_diff = target.pos.y - bot.pos.y
+                    x_diff = target.pos.x - bot.pos.x
+                    step = STOP
+                    if abs(y_diff) > abs(x_diff):
+                        step = (1 if y_diff > 0 else -1, 0)
+                    else:
+                        step = (0, 1 if x_diff > 0 else -1)
+                    new_pos = Position(bot.pos.y + step[0], bot.pos.x + step[1])
+                    if not self.game_map.is_wall(new_pos):
+                        bot.pos = new_pos
+                    else:
+                        # Random move
+                        bot.pos = self.random_bot_move(bot.pos)
+            else:
+                # Crewmate bot do random moves and try tasks
+                if bot.tasks_completed >= bot.total_tasks:
+                    continue  # done all tasks
+                # Move randomly, try to do task
+                new_pos = self.random_bot_move(bot.pos)
+                if new_pos and not self.game_map.is_wall(new_pos):
+                    bot.pos = new_pos
+                # Try to do task
+                for task in self.tasks:
+                    if not task.completed and bot.pos == task.pos:
+                        task.completed = True
+                        bot.tasks_completed += 1
+                        self.message = f"{bot.name} completed a task."
+                        break
+
+    def random_bot_move(self, pos):
+        random_dirs = DIRECTIONS[:]
+        random.shuffle(random_dirs)
+        for d in random_dirs:
+            new_pos = Position(pos.y + d[0], pos.x + d[1])
+            if not self.game_map.is_wall(new_pos):
+                return new_pos
+        return pos
+
+    def check_win_conditions(self):
+        # Crewmates win if all tasks completed
+        tasks_left = any(not task.completed for task in self.tasks)
+        if not tasks_left:
+            self.message = "Crewmates win by completing all tasks!"
+            self.game_over = True
+            return 'crew'
+
+        # Impostors win if kill count >= half crew
+        alive_crewmates = sum(1 for p in self.players if p.alive and not p.is_impostor)
+        if alive_crewmates == 0:
+            self.message = "Impostors win by killing all crewmates!"
+            self.game_over = True
+            return 'impostor'
+
+        # Player(s) alive continue game
+        return None
+
+    def select_map(self):
+        self.stdscr.clear()
+        self.stdscr.addstr(0,0,"Select a map to play:")
+        for idx, m in enumerate(self.maps):
+            self.stdscr.addstr(idx+1, 0, f"{idx+1}. {m.name}")
+        self.stdscr.addstr(len(self.maps)+2, 0, "Enter number of map:")
+        self.stdscr.refresh()
+        while True:
+            c = self.stdscr.getch()
+            if c in [ord(str(i)) for i in range(1, len(self.maps)+1)]:
+                self.current_map_index = int(chr(c)) - 1
+                break
+
+    def main_loop(self):
+        self.select_map()
+        self.setup_game()
+        while not self.game_over:
+            self.draw()
+            self.handle_input()
+            self.bots_take_turn()
+            self.turn_count += 1
+            winner = self.check_win_conditions()
+            if winner:
+                self.draw()
+                time.sleep(3)
+                break
+            time.sleep(0.12)
+        self.draw()
+        self.stdscr.addstr(self.game_map.height + 10, 0, "Game Over! Press any key to exit.", curses.color_pair(COLOR_TEXT))
+        self.stdscr.refresh()
+        self.stdscr.getch()
+
+def main(stdscr):
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    stdscr.timeout(100)
+    curses.start_color()
+
+    curses.init_pair(COLOR_WALL, curses.COLOR_BLUE, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_DOOR, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_TASK, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_CREWMATE, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_IMPOSTOR, curses.COLOR_RED, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_TEXT, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    curses.init_pair(COLOR_KILL, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+
+    game = Game(stdscr)
+    game.main_loop()
+
+if __name__ == "__main__":
+    curses.wrapper(main)
+
+
+```
