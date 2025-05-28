@@ -1,0 +1,394 @@
+import random
+import sys
+import time
+
+# Constants for classes
+CLASSES = {
+    'Warrior': {
+        'hp': 150,
+        'mp': 50,
+        'attack': 15,
+        'defense': 10,
+        'magic': 5,
+    },
+    'Mage': {
+        'hp': 80,
+        'mp': 150,
+        'attack': 5,
+        'defense': 5,
+        'magic': 20,
+    },
+    'Rogue': {
+        'hp': 100,
+        'mp': 80,
+        'attack': 12,
+        'defense': 7,
+        'magic': 10,
+    }
+}
+
+ITEMS = {
+    'Potion': {'type': 'heal', 'value': 50, 'price': 10},
+    'Hi-Potion': {'type': 'heal', 'value': 100, 'price': 25},
+    'Ether': {'type': 'mp', 'value': 40, 'price': 15},
+    'Sword': {'type': 'weapon', 'attack': 5, 'price': 50},
+    'Staff': {'type': 'weapon', 'magic': 7, 'price': 50},
+    'Dagger': {'type': 'weapon', 'attack': 3, 'price': 30},
+    'Shield': {'type': 'armor', 'defense': 5, 'price': 40},
+    'Robe': {'type': 'armor', 'defense': 3, 'price': 30},
+    'Leather Armor': {'type': 'armor', 'defense': 4, 'price': 35},
+}
+
+class Player:
+    def __init__(self, name, pclass):
+        self.name = name
+        self.pclass = pclass
+        self.level = 1
+        self.exp = 0
+        self.gold = 100
+        self.max_hp = CLASSES[pclass]['hp']
+        self.hp = self.max_hp
+        self.max_mp = CLASSES[pclass]['mp']
+        self.mp = self.max_mp
+        self.base_attack = CLASSES[pclass]['attack']
+        self.base_defense = CLASSES[pclass]['defense']
+        self.base_magic = CLASSES[pclass]['magic']
+        self.weapon = None
+        self.armor = None
+        self.inventory = {}
+        self.location = 0  # index of location
+
+    def attack_strength(self):
+        weapon_bonus = 0
+        if self.weapon and 'attack' in ITEMS[self.weapon]:
+            weapon_bonus = ITEMS[self.weapon]['attack']
+        return self.base_attack + weapon_bonus
+
+    def magic_strength(self):
+        weapon_bonus = 0
+        if self.weapon and 'magic' in ITEMS[self.weapon]:
+            weapon_bonus = ITEMS[self.weapon]['magic']
+        return self.base_magic + weapon_bonus
+
+    def defense_strength(self):
+        armor_bonus = 0
+        if self.armor and 'defense' in ITEMS[self.armor]:
+            armor_bonus = ITEMS[self.armor]['defense']
+        return self.base_defense + armor_bonus
+
+    def add_item(self, item, quantity=1):
+        if item in self.inventory:
+            self.inventory[item] += quantity
+        else:
+            self.inventory[item] = quantity
+
+    def use_item(self, item):
+        if item not in self.inventory or self.inventory[item] <= 0:
+            print("You don't have that item.")
+            return False
+        item_info = ITEMS.get(item, None)
+        if not item_info:
+            print("Item does not exist.")
+            return False
+        if item_info['type'] == 'heal':
+            heal_amount = item_info['value']
+            self.hp = min(self.max_hp, self.hp + heal_amount)
+            print(f"You used {item} and restored {heal_amount} HP.")
+        elif item_info['type'] == 'mp':
+            mp_amount = item_info['value']
+            self.mp = min(self.max_mp, self.mp + mp_amount)
+            print(f"You used {item} and restored {mp_amount} MP.")
+        else:
+            print(f"You can't use {item} right now.")
+            return False
+        self.inventory[item] -= 1
+        if self.inventory[item] == 0:
+            del self.inventory[item]
+        return True
+
+    def gain_exp(self, amount):
+        self.exp += amount
+        while self.exp >= self.exp_to_next_level():
+            self.level_up()
+
+    def exp_to_next_level(self):
+        return 100 + self.level * 50
+
+    def level_up(self):
+        self.level += 1
+        self.max_hp += 10
+        self.hp = self.max_hp
+        self.max_mp += 5
+        self.mp = self.max_mp
+        self.base_attack += 2
+        self.base_defense += 1
+        self.base_magic += 2
+        print(f"You leveled up! You are now level {self.level}!")
+
+class Enemy:
+    def __init__(self, name, level):
+        self.name = name
+        self.level = level
+        base_hp = 50 + level * 10
+        self.hp = base_hp
+        self.max_hp = base_hp
+        self.attack = 10 + level * 3
+        self.defense = 5 + level * 2
+        self.exp_reward = 20 + level * 10
+        self.gold_reward = 15 + level * 10
+
+    def is_alive(self):
+        return self.hp > 0
+
+class Shop:
+    def __init__(self):
+        self.items = list(ITEMS.keys())
+
+    def show_shop(self, player):
+        print("\nWelcome to the shop! Your gold:", player.gold)
+        print("Items for sale:")
+        for idx, item in enumerate(self.items, 1):
+            price = ITEMS[item]['price']
+            print(f"{idx}. {item} - {price} gold")
+        print("0. Exit shop")
+
+    def buy_item(self, player, choice):
+        if choice <= 0 or choice > len(self.items):
+            print("Exiting shop.")
+            return False
+        item = self.items[choice - 1]
+        price = ITEMS[item]['price']
+        if player.gold < price:
+            print("You don't have enough gold.")
+            return True
+        player.gold -= price
+        player.add_item(item)
+        print(f"You bought {item} for {price} gold.")
+        return True
+
+class Location:
+    def __init__(self, name, shop):
+        self.name = name
+        self.shop = shop
+        self.visited = False
+        self.enemy = None  # Enemy that might appear here, or None
+
+class Game:
+    def __init__(self):
+        self.locations = []
+        self.player = None
+        self.init_locations()
+        self.running = True
+
+    def init_locations(self):
+        for i in range(1, 51):
+            shop = Shop()
+            location = Location(f"Location {i}", shop)
+            # Add random enemy 30% chance
+            if random.random() < 0.3:
+                level = max(1, i // 2)
+                location.enemy = Enemy("Goblin", level)
+            self.locations.append(location)
+
+    def create_player(self):
+        print("Welcome to the RPG game!")
+        name = input("Enter your character name: ").strip()
+        print("Available classes:")
+        for idx, cls in enumerate(CLASSES.keys(), 1):
+            print(f"{idx}. {cls}")
+        while True:
+            choice = input("Choose your class (number): ")
+            if choice.isdigit() and 1 <= int(choice) <= len(CLASSES):
+                pclass = list(CLASSES.keys())[int(choice)-1]
+                break
+            print("Invalid choice.")
+        self.player = Player(name, pclass)
+        print(f"You created {name} the {pclass}!")
+
+    def game_loop(self):
+        self.create_player()
+        while self.running:
+            self.show_location()
+            self.player_action()
+
+    def show_location(self):
+        loc = self.locations[self.player.location]
+        print(f"\nYou are at {loc.name}")
+        if not loc.visited:
+            print("You arrive at a new place. There is a shop here!")
+            loc.visited = True
+        else:
+            print("You have been here before.")
+        if loc.enemy and loc.enemy.is_alive():
+            print(f"A wild {loc.enemy.name} appears! Level {loc.enemy.level}!")
+        else:
+            loc.enemy = None
+
+    def player_action(self):
+        loc = self.locations[self.player.location]
+        print("\nWhat would you like to do?")
+        print("1. Travel to another location")
+        print("2. Visit the shop")
+        if loc.enemy:
+            print("3. Fight the enemy")
+            print("4. Show character status")
+            print("5. Use item")
+            print("0. Quit game")
+            valid_choices = {'0','1','2','3','4','5'}
+        else:
+            print("3. Show character status")
+            print("4. Use item")
+            print("0. Quit game")
+            valid_choices = {'0','1','2','3','4'}
+
+        choice = input("Enter choice: ").strip()
+        if choice not in valid_choices:
+            print("Invalid choice.")
+            return
+
+        if choice == '0':
+            print("Thanks for playing!")
+            self.running = False
+        elif choice == '1':
+            self.travel()
+        elif choice == '2':
+            self.visit_shop(loc.shop)
+        elif choice == '3':
+            if loc.enemy:
+                self.fight(loc.enemy)
+            else:
+                self.show_status()
+        elif choice == '4':
+            if loc.enemy:
+                self.show_status()
+            else:
+                self.use_item()
+        elif choice == '5':
+            if loc.enemy:
+                self.use_item()
+
+    def travel(self):
+        print("\nWhere do you want to go?")
+        for idx, loc in enumerate(self.locations, 1):
+            print(f"{idx}. {loc.name}")
+        while True:
+            choice = input("Enter location number: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(self.locations):
+                self.player.location = int(choice)-1
+                print(f"You travel to {self.locations[self.player.location].name}.")
+                break
+            else:
+                print("Invalid choice.")
+
+    def visit_shop(self, shop):
+        print("\nEntering the shop...")
+        while True:
+            shop.show_shop(self.player)
+            choice = input("Buy item number or 0 to exit: ").strip()
+            if not choice.isdigit():
+                print("Invalid choice.")
+                continue
+            c = int(choice)
+            if c == 0:
+                print("Leaving the shop.")
+                break
+            shop.buy_item(self.player, c)
+
+    def fight(self, enemy):
+        print(f"\nBattle with {enemy.name}!")
+        while enemy.is_alive() and self.player.hp > 0:
+            print(f"\nYour HP: {self.player.hp}/{self.player.max_hp} MP: {self.player.mp}/{self.player.max_mp}")
+            print(f"{enemy.name} HP: {enemy.hp}/{enemy.max_hp}")
+            print("Choose action:")
+            print("1. Physical Attack")
+            print("2. Magic Attack (costs 10 MP)")
+            print("3. Use Item")
+            print("4. Run Away")
+            choice = input("Choice: ").strip()
+            if choice == '1':
+                damage = max(0, self.player.attack_strength() - enemy.defense)
+                enemy.hp -= damage
+                print(f"You hit {enemy.name} for {damage} damage!")
+            elif choice == '2':
+                if self.player.mp < 10:
+                    print("Not enough MP!")
+                    continue
+                self.player.mp -= 10
+                damage = max(0, self.player.magic_strength() * 2 - enemy.defense)
+                enemy.hp -= damage
+                print(f"You cast a spell on {enemy.name} for {damage} damage!")
+            elif choice == '3':
+                self.use_item()
+                continue
+            elif choice == '4':
+                success = random.random()
+                if success < 0.5:
+                    print("You failed to run away!")
+                else:
+                    print("You ran away safely!")
+                    return
+            else:
+                print("Invalid choice.")
+                continue
+
+            if enemy.hp <= 0:
+                print(f"You defeated {enemy.name}!")
+                self.player.gain_exp(enemy.exp_reward)
+                self.player.gold += enemy.gold_reward
+                print(f"You gained {enemy.exp_reward} EXP and {enemy.gold_reward} gold.")
+                break
+
+            # Enemy attacks back
+            damage = max(0, enemy.attack - self.player.defense_strength())
+            self.player.hp -= damage
+            print(f"{enemy.name} hits you for {damage} damage!")
+
+            if self.player.hp <= 0:
+                print("You have been defeated! Game Over.")
+                self.running = False
+                break
+
+    def show_status(self):
+        p = self.player
+        print(f"\n{name}, the {p.pclass} - Level {p.level}")
+        print(f"HP: {p.hp}/{p.max_hp}  MP: {p.mp}/{p.max_mp}")
+        print(f"Attack: {p.attack_strength()}  Defense: {p.defense_strength()}  Magic: {p.magic_strength()}")
+        print(f"Gold: {p.gold}  EXP: {p.exp}/{p.exp_to_next_level()}")
+        print(f"Weapon: {p.weapon if p.weapon else 'None'}")
+        print(f"Armor: {p.armor if p.armor else 'None'}")
+        print("Inventory:")
+        if not p.inventory:
+            print("  Empty")
+        else:
+            for item, qty in p.inventory.items():
+                print(f"  {item} x{qty}")
+
+    def use_item(self):
+        p = self.player
+        if not p.inventory:
+            print("You have no items.")
+            return
+        print("\nItems:")
+        items = list(p.inventory.keys())
+        for idx, item in enumerate(items, 1):
+            print(f"{idx}. {item} x{p.inventory[item]}")
+        print("0. Cancel")
+        while True:
+            choice = input("Use which item? ").strip()
+            if choice == '0':
+                print("Cancelled.")
+                return
+            if choice.isdigit() and 1 <= int(choice) <= len(items):
+                item = items[int(choice)-1]
+                if p.use_item(item):
+                    return
+                else:
+                    return
+            print("Invalid choice.")
+
+if __name__ == '__main__':
+    game = Game()
+    game.game_loop()
+
+
+```
