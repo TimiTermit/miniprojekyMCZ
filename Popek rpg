@@ -1,0 +1,514 @@
+import pygame
+import sys
+import random
+import math
+
+pygame.init()
+pygame.mixer.init()
+
+
+WIDTH, HEIGHT = 800, 600
+SCREEN = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Top-Down Shooter Adventure")
+
+
+FPS = 60
+CLOCK = pygame.time.Clock()
+
+
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+RED = (220, 20, 60)
+GREEN = (34, 177, 76)
+BLUE = (70, 130, 180)
+YELLOW = (255, 255, 0)
+GREY = (169, 169, 169)
+DARKGREY = (40, 40, 40)
+
+
+FONT_NAME = pygame.font.match_font('arial')
+
+
+SHOOT_SOUND = pygame.mixer.Sound('sounds/shoot.wav')
+HIT_SOUND = pygame.mixer.Sound('sounds/hit.wav')
+POWERUP_SOUND = pygame.mixer.Sound('sounds/powerup.wav')
+ENEMY_DEATH_SOUND = pygame.mixer.Sound('sounds/enemy_death.wav')
+
+# Background music (looped)
+pygame.mixer.music.load('sounds/background_music.ogg')
+pygame.mixer.music.set_volume(0.2)
+
+
+def draw_text(surface, text, size, x, y, color=WHITE, center=True):
+    font = pygame.font.Font(FONT_NAME, size)
+    text_surface = font.render(text, True, color)
+    text_rect = text_surface.get_rect()
+    if center:
+        text_rect.center = (x, y)
+    else:
+        text_rect.topleft = (x, y)
+    surface.blit(text_surface, text_rect)
+
+def load_image(path, scale=None, colorkey=None):
+    image = pygame.image.load(path).convert_alpha()
+    if scale:
+        image = pygame.transform.scale(image, scale)
+    if colorkey:
+        image.set_colorkey(colorkey)
+    return image
+
+def rotate_center(image, angle):
+    rotated_image = pygame.transform.rotate(image, angle)
+    rect = rotated_image.get_rect(center = image.get_rect().center)
+    return rotated_image, rect
+
+
+class Player(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.original_image = load_image('images/player.png', (50, 50))
+        self.image = self.original_image.copy()
+        self.rect = self.image.get_rect(center=(x,y))
+        self.pos = pygame.math.Vector2(x, y)
+        self.angle = 0
+        self.speed = 5
+        self.health = 100
+        self.max_health = 100
+        self.ammo = 20
+        self.max_ammo = 20
+        self.reload_time = 2000  # milliseconds
+        self.last_reload = 0
+        self.reloading = False
+        self.score = 0
+
+    def update(self):
+        self.movement()
+        self.rotate()
+        # Reload logic
+        if self.reloading:
+            now = pygame.time.get_ticks()
+            if now - self.last_reload >= self.reload_time:
+                self.ammo = self.max_ammo
+                self.reloading = False
+
+    def movement(self):
+        keys = pygame.key.get_pressed()
+        velocity = pygame.math.Vector2(0,0)
+        if keys[pygame.K_w] or keys[pygame.K_UP]:
+            velocity.y = -self.speed
+        if keys[pygame.K_s] or keys[pygame.K_DOWN]:
+            velocity.y = self.speed
+        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+            velocity.x = -self.speed
+        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+            velocity.x = self.speed
+        if velocity.length_squared() > 0:
+            velocity = velocity.normalize() * self.speed
+        self.pos += velocity
+        self.pos.x = max(0 + self.rect.width/2, min(WIDTH - self.rect.width/2, self.pos.x))
+        self.pos.y = max(0 + self.rect.height/2, min(HEIGHT - self.rect.height/2, self.pos.y))
+        self.rect.center = self.pos
+
+    def rotate(self):
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        rel_x, rel_y = mouse_x - self.pos.x, mouse_y - self.pos.y
+        self.angle = (180 / math.pi) * -math.atan2(rel_y, rel_x) - 90
+        self.image = pygame.transform.rotate(self.original_image, int(self.angle))
+        self.rect = self.image.get_rect(center=self.rect.center)
+
+    def shoot(self):
+        if self.ammo > 0 and not self.reloading:
+            self.ammo -= 1
+            SHOOT_SOUND.play()
+            return Bullet(self.pos.x, self.pos.y, self.angle)
+        else:
+            return None
+
+    def reload(self):
+        if not self.reloading and self.ammo < self.max_ammo:
+            self.reloading = True
+            self.last_reload = pygame.time.get_ticks()
+
+    def draw_health_bar(self, surface):
+        bar_length = 200
+        bar_height = 20
+        x = 10
+        y = 10
+        fill = (self.health / self.max_health) * bar_length
+        outline_rect = pygame.Rect(x, y, bar_length, bar_height)
+        fill_rect = pygame.Rect(x, y, fill, bar_height)
+        pygame.draw.rect(surface, GREEN, fill_rect)
+        pygame.draw.rect(surface, WHITE, outline_rect, 2)
+
+    def draw_ammo(self, surface):
+        x = 10
+        y = 40
+        draw_text(surface, f'Ammo: {self.ammo}', 20, x, y, WHITE, center=False)
+        if self.reloading:
+            draw_text(surface, 'Reloading...', 20, x+80, y, YELLOW, center=False)
+
+    def draw_score(self, surface):
+        x = WIDTH - 10
+        y = 10
+        draw_text(surface, f'Score: {self.score}', 24, x, y, WHITE, center=False)
+
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, x, y, angle):
+        super().__init__()
+        self.image = pygame.Surface((8, 16))
+        self.image.fill(YELLOW)
+        self.orig_image = self.image
+        self.rect = self.image.get_rect(center=(x, y))
+        self.pos = pygame.math.Vector2(x, y)
+        self.speed = 15
+        self.angle = angle
+        self.vel = pygame.math.Vector2()
+        self.vel.from_polar((self.speed, -angle-90))
+
+        self.image = pygame.transform.rotate(self.orig_image, angle)
+
+    def update(self):
+        self.pos += self.vel
+        self.rect.center = self.pos
+        # Remove if off screen
+        if (self.rect.bottom < 0 or self.rect.top > HEIGHT or
+            self.rect.right < 0 or self.rect.left > WIDTH):
+            self.kill()
+
+class Enemy(pygame.sprite.Sprite):
+    def __init__(self, x, y, enemy_type='basic'):
+        super().__init__()
+        self.enemy_type = enemy_type
+        if enemy_type == 'basic':
+            self.image = load_image('images/enemy_basic.png', (40, 40))
+            self.speed = 2
+            self.health = 30
+            self.max_health = 30
+            self.damage = 10
+            self.score_value = 10
+        elif enemy_type == 'fast':
+            self.image = load_image('images/enemy_fast.png', (30, 30))
+            self.speed = 3.5
+            self.health = 20
+            self.max_health = 20
+            self.damage = 8
+            self.score_value = 15
+        elif enemy_type == 'tank':
+            self.image = load_image('images/enemy_tank.png', (60, 60))
+            self.speed = 1
+            self.health = 60
+            self.max_health = 60
+            self.damage = 20
+            self.score_value = 25
+        self.rect = self.image.get_rect(center=(x, y))
+        self.pos = pygame.math.Vector2(x, y)
+        self.target = None
+
+    def update(self):
+        # Simple AI: Move toward player
+        if self.target:
+            direction = self.target.pos - self.pos
+            if direction.length() > 0:
+                direction = direction.normalize()
+                self.pos += direction * self.speed
+                self.rect.center = self.pos
+
+    def draw_health_bar(self, surface):
+        bar_length = self.rect.width
+        bar_height = 5
+        x = self.rect.left
+        y = self.rect.top - 10
+        fill = (self.health / self.max_health) * bar_length
+        outline_rect = pygame.Rect(x, y, bar_length, bar_height)
+        fill_rect = pygame.Rect(x, y, fill, bar_height)
+        pygame.draw.rect(surface, RED, fill_rect)
+        pygame.draw.rect(surface, WHITE, outline_rect, 1)
+
+class PowerUp(pygame.sprite.Sprite):
+    def __init__(self, x, y, kind ='health'):
+        super().__init__()
+        self.kind = kind
+        if kind == 'health':
+            self.image = load_image('images/powerup_health.png', (30, 30))
+        elif kind == 'ammo':
+            self.image = load_image('images/powerup_ammo.png', (30, 30))
+        self.rect = self.image.get_rect(center=(x, y))
+
+class Game:
+    def __init__(self):
+        self.running = True
+        self.playing = False
+        self.paused = False
+        self.player = Player(WIDTH/2, HEIGHT/2)
+        self.all_sprites = pygame.sprite.Group()
+        self.bullets = pygame.sprite.Group()
+        self.enemies = pygame.sprite.Group()
+        self.powerups = pygame.sprite.Group()
+        self.all_sprites.add(self.player)
+        self.level = 1
+        self.spawn_cooldown = 2000  # ms
+        self.last_spawn = 0
+        self.enemy_count = 0
+        self.max_enemies = 5
+        self.spawn_wave()
+        self.game_over = False
+
+    def spawn_wave(self):
+        # Spawn enemies based on level
+        self.enemy_count = self.level * 5
+        self.max_enemies = self.level * 5
+        for _ in range(self.enemy_count):
+            side = random.choice(['top', 'bottom', 'left', 'right'])
+            if side == 'top':
+                x = random.randint(0, WIDTH)
+                y = -50
+            elif side == 'bottom':
+                x = random.randint(0, WIDTH)
+                y = HEIGHT + 50
+            elif side == 'left':
+                x = -50
+                y = random.randint(0, HEIGHT)
+            else:  # right
+                x = WIDTH + 50
+                y = random.randint(0, HEIGHT)
+            enemy_type = random.choices(['basic', 'fast', 'tank'], weights=[0.7, 0.2, 0.1])[0]
+            enemy = Enemy(x, y, enemy_type)
+            enemy.target = self.player
+            self.enemies.add(enemy)
+            self.all_sprites.add(enemy)
+
+    def spawn_powerup(self):
+        kind = random.choice(['health', 'ammo'])
+        x = random.randint(50, WIDTH - 50)
+        y = random.randint(50, HEIGHT - 50)
+        powerup = PowerUp(x, y, kind)
+        self.powerups.add(powerup)
+        self.all_sprites.add(powerup)
+
+    def check_collisions(self):
+        # Bullet hits enemy
+        hits = pygame.sprite.groupcollide(self.enemies, self.bullets, False, True)
+        for enemy, bullets in hits.items():
+            for bullet in bullets:
+                enemy.health -= 15
+                HIT_SOUND.play()
+                if enemy.health <= 0:
+                    ENEMY_DEATH_SOUND.play()
+                    enemy.kill()
+                    self.player.score += enemy.score_value
+                    self.enemy_count -= 1
+                    # Spawn powerup sometimes
+                    if random.random() < 0.2:
+                        self.spawn_powerup()
+
+        
+        enemy_hits = pygame.sprite.spritecollide(self.player, self.enemies, False)
+        for enemy in enemy_hits:
+            self.player.health -= enemy.damage
+            enemy.health -= 15
+            HIT_SOUND.play()
+            if enemy.health <= 0:
+                ENEMY_DEATH_SOUND.play()
+                enemy.kill()
+                self.player.score += enemy.score_value
+                self.enemy_count -= 1
+            if self.player.health <= 0:
+                self.game_over = True
+                self.playing = False
+
+        
+        powerup_hits = pygame.sprite.spritecollide(self.player, self.powerups, True)
+        for powerup in powerup_hits:
+            POWERUP_SOUND.play()
+            if powerup.kind == 'health':
+                self.player.health = min(self.player.health + 30, self.player.max_health)
+            elif powerup.kind == 'ammo':
+                self.player.ammo = min(self.player.ammo + 10, self.player.max_ammo)
+
+    def events(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+                self.playing = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_r:
+                    self.player.reload()
+                if event.key == pygame.K_ESCAPE:
+                    self.paused = not self.paused
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1 and not self.paused and self.playing:
+                    bullet = self.player.shoot()
+                    if bullet:
+                        self.bullets.add(bullet)
+                        self.all_sprites.add(bullet)
+
+    def update(self):
+        if not self.paused and self.playing:
+            self.all_sprites.update()
+            self.check_collisions()
+            # Spawn enemies over time if below max count
+            now = pygame.time.get_ticks()
+            if self.enemy_count < self.max_enemies and now - self.last_spawn >= self.spawn_cooldown:
+                self.spawn_enemy()
+                self.last_spawn = now
+            # Next Level condition
+            if self.enemy_count <= 0:
+                self.level += 1
+                self.spawn_wave()
+
+    def spawn_enemy(self):
+        side = random.choice(['top', 'bottom', 'left', 'right'])
+        if side == 'top':
+            x = random.randint(0, WIDTH)
+            y = -50
+        elif side == 'bottom':
+            x = random.randint(0, WIDTH)
+            y = HEIGHT + 50
+        elif side == 'left':
+            x = -50
+            y = random.randint(0, HEIGHT)
+        else:  # right
+            x = WIDTH + 50
+            y = random.randint(0, HEIGHT)
+        enemy_type = random.choices(['basic', 'fast', 'tank'], weights=[0.7, 0.2, 0.1])[0]
+        enemy = Enemy(x, y, enemy_type)
+        enemy.target = self.player
+        self.enemies.add(enemy)
+        self.all_sprites.add(enemy)
+        self.enemy_count += 1
+
+    def draw_ui(self):
+        self.player.draw_health_bar(SCREEN)
+        self.player.draw_ammo(SCREEN)
+        self.player.draw_score(SCREEN)
+        # Draw level display
+        draw_text(SCREEN, f'Level: {self.level}', 20, WIDTH/2, 10)
+
+    def draw_pause_screen(self):
+        draw_text(SCREEN, "Game Paused", 64, WIDTH/2, HEIGHT/2 - 50, YELLOW)
+        draw_text(SCREEN, "Press ESC to Resume", 30, WIDTH/2, HEIGHT/2 + 20, WHITE)
+
+    def draw_game_over(self):
+        SCREEN.fill(BLACK)
+        draw_text(SCREEN, "GAME OVER", 72, WIDTH/2, HEIGHT/2 - 50, RED)
+        draw_text(SCREEN, f"Final Score: {self.player.score}", 36, WIDTH/2, HEIGHT/2 + 20, WHITE)
+        draw_text(SCREEN, "Press Enter to Restart or ESC to Quit", 24, WIDTH/2, HEIGHT/2 + 70, GREY)
+        pygame.display.flip()
+
+    def start_screen(self):
+        SCREEN.fill(BLACK)
+        draw_text(SCREEN, "Top-Down Shooter Adventure", 48, WIDTH/2, HEIGHT/2 - 80, GREEN)
+        draw_text(SCREEN, "WASD to move, Mouse to aim and shoot", 24, WIDTH/2, HEIGHT/2 - 20)
+        draw_text(SCREEN, "R to reload, ESC to pause", 24, WIDTH/2, HEIGHT/2 + 20)
+        draw_text(SCREEN, "Press Enter to Start", 28, WIDTH/2, HEIGHT/2 + 80, YELLOW)
+        pygame.display.flip()
+
+        waiting = True
+        while waiting:
+            CLOCK.tick(FPS)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    waiting = False
+                    self.running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_RETURN:
+                        waiting = False
+                        self.playing = True
+
+    def run(self):
+        pygame.mixer.music.play(-1)
+        self.start_screen()
+        while self.running:
+            self.events()
+            if self.playing and not self.paused:
+                self.update()
+            SCREEN.fill(DARKGREY)
+            self.all_sprites.draw(SCREEN)
+            for enemy in self.enemies:
+                enemy.draw_health_bar(SCREEN)
+            self.draw_ui()
+
+            if self.paused:
+                self.draw_pause_screen()
+
+            if self.game_over:
+                self.draw_game_over()
+                self.wait_for_restart_or_quit()
+
+            pygame.display.flip()
+            CLOCK.tick(FPS)
+        pygame.quit()
+        sys.exit()
+
+    def wait_for_restart_or_quit(self):
+        waiting = True
+        while waiting:
+            CLOCK.tick(FPS)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    waiting = False
+                    self.running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_RETURN:
+                        self.reset_game()
+                        waiting = False
+                    elif event.key == pygame.K_ESCAPE:
+                        waiting = False
+                        self.running = False
+
+    def reset_game(self):
+        self.player.health = self.player.max_health
+        self.player.ammo = self.player.max_ammo
+        self.player.score = 0
+        self.level = 1
+        self.enemy_count = 0
+        self.game_over = False
+        self.paused = False
+        # Remove all enemies, bullets, powerups
+        self.enemies.empty()
+        self.bullets.empty()
+        self.powerups.empty()
+        self.all_sprites.empty()
+        self.all_sprites.add(self.player)
+        self.spawn_wave()
+
+if __name__ == "__main__":
+    # Check for resource presence and load dummy if missing
+    import os
+
+    def create_dummy_sound(path):
+        # If sound file is not found, create a dummy silent sound
+        if not os.path.exists(path):
+            pygame.mixer.Sound(buffer=pygame.sndarray.make_sound(pygame.surfarray.array2d(pygame.Surface((1,1))))) # silent dummy
+
+    # Create dummy sounds to avoid errors if files missing
+    for sound_path in ['sounds/shoot.wav', 'sounds/hit.wav', 'sounds/powerup.wav', 'sounds/enemy_death.wav']:
+        if not os.path.exists(sound_path):
+            # We won't raise error but sound will not play
+            pass
+
+    # Background music dummy check
+    if not os.path.exists('sounds/background_music.ogg'):
+        # no background music loaded
+        pass
+
+    # Check images existence or create simple shapes instead
+    def load_image_safe(path, scale=None):
+        if os.path.exists(path):
+            image = pygame.image.load(path).convert_alpha()
+            if scale:
+                image = pygame.transform.scale(image, scale)
+            return image
+        else:
+            # Create a dummy surface with color
+            dummy = pygame.Surface((scale if scale else (50,50)))
+            dummy.fill(RED)
+            return dummy
+
+    # Override load_image with safe loader for fallback
+    globals()['load_image'] = load_image_safe
+
+    game = Game()
+    game.run()
+
+
